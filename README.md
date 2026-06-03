@@ -8,6 +8,26 @@ This README reflects the current endpoints implemented in `grace_new.api.server`
 
 If your deployment is behind a reverse proxy prefix (for example `/status`), prepend that prefix to all routes below.
 
+## Local Server
+
+Start the API with the default processed Chroma DB:
+
+```bash
+PYTHONPATH=src uv run python -m grace_new.api.server \
+  --port 8010 \
+  --agentic_model_config model/azure/gpt-5.4-mini.json \
+  --text2query_model_config model/azure/gpt-5.4-mini.json
+```
+
+When no retrieval backend is specified, Chroma mode defaults to path
+`chroma_db_processed_data_20_5`, collection `chunks`, and embedding model
+`Qwen/Qwen3-Embedding-0.6B`.
+
+By default, every `/retrieve`, `/text2query`, `/sql`, and `/agentic_query` request
+is logged and appended as JSONL to `outputs/server_logs/query_responses.jsonl`.
+Use `--query_log_file path/to/file.jsonl` to choose another file, or pass
+`--query_log_file ""` to disable saving audit records.
+
 ## Available Endpoints
 
 - `GET /` - API metadata and endpoint listing
@@ -15,17 +35,34 @@ If your deployment is behind a reverse proxy prefix (for example `/status`), pre
 - `POST /agentic_query` - Agentic orchestration over RAG + Text2Query
 - `POST /retrieve` - Single-query semantic retrieval
 - `POST /text2query` - NL question to SQL execution on elderly services DB
+- `POST /sql` - Direct read-only SQL execution on elderly services DB
 - `GET /docs` - Swagger UI
 
 ## 1. Health (`GET /health`)
 
-Returns API readiness for retrieval, text2query, and agentic systems.
+Returns API readiness for retrieval, text2query, direct SQL, and agentic systems.
 
 Example:
 
 ```bash
 curl "https://songcpu1.cse.ust.hk/status/health"
 ```
+
+Response shape:
+
+```json
+{
+  "status": "healthy",
+  "mode": "chroma",
+  "ready": true,
+  "text2query_ready": true,
+  "sql_ready": true,
+  "agentic_ready": true
+}
+```
+
+`ready` describes the semantic retrieval backend. `sql_ready` is `true` when
+the configured SQLite database is available for `/sql`.
 
 ## 2. Agentic Query (`POST /agentic_query`)
 
@@ -42,7 +79,7 @@ Example:
 curl -X POST "https://songcpu1.cse.ust.hk/status/agentic_query" \
   -H "Content-Type: application/json" \
   -d '{
-    "question": "請比較東區日間護理服務與交通支援",
+    "question": "列出提供日間護理服務的中心",
     "mode": "citation",
     "max_steps": 5,
     "rag_top_k": 5,
@@ -74,12 +111,12 @@ Citation response shape:
       "tool": "text2query_sql",
       "source_type": "structured_row",
       "path": "/abs/path/data/structured_data/Elderly service information 20260302 split.xlsx",
-      "locator": "table=elderly_services; center_id=7",
+      "locator": "table=elderly_services; center_id=129",
       "locator_status": "exact",
       "rank": 1,
       "confidence": null,
-      "snippet": "center_id=7; center_name=...; address=...",
-      "careers_url": "https://www.carers.hk/unit/7"
+      "snippet": "center_id=129; center_name=...; address=...; carers_url=https://www.carers.hk/unit/5491",
+      "careers_url": "https://www.carers.hk/unit/5491"
     }
   ],
   "used_tools": ["rag_retrieve", "text2query_sql"],
@@ -163,6 +200,10 @@ The current default structured source is:
 - Excel: `data/structured_data/Elderly service information 20260302 split.xlsx`
 - SQLite: `data/structured_data/elderly_services_split.sqlite`
 
+The `carers_url` values are regenerated from live carers.hk unit indexes with
+detail-page matching; see
+[`docs/CARERS_URL_GENERATION.md`](docs/CARERS_URL_GENERATION.md).
+
 For centre/unit row queries, `center_id` is always included in the returned rows. If the generated SQL omits it, the server adds it by matching the returned row back to the structured table.
 
 Example:
@@ -188,6 +229,80 @@ Response shape:
   "row_count": 1
 }
 ```
+
+## 5. Direct SQL (`POST /sql`)
+
+Executes a direct read-only SQL query on the configured SQLite DB. Only
+`SELECT` and `WITH` queries are accepted; write and DDL commands are rejected.
+The endpoint uses `--text2query_db`, which defaults to
+`data/structured_data/elderly_services_split.sqlite`.
+
+This endpoint executes SQL supplied by the caller. Expose it only behind a
+trusted network boundary or your deployment's authentication layer.
+
+Request fields:
+
+- `sql` (required): read-only SQLite query.
+- `max_rows` (optional): maximum rows to return; defaults to 500 and can be set up to 5000.
+
+Main table schema:
+
+Table: `elderly_services`
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `id` | INTEGER | Surrogate primary key |
+| `center_id` | INTEGER | Stable centre/unit identifier shared by paired English and Traditional Chinese rows |
+| `organization` | TEXT | Organisation or company name |
+| `center_name` | TEXT | Centre or unit name |
+| `language` | TEXT | Row language: `en` or `zh-hk` |
+| `target_group` | TEXT | Target audience code, for example `8-Elderly` or `8-長者` |
+| `center_type` | TEXT | Centre/unit category; may contain multiple semicolon-separated values |
+| `district` | TEXT | Districts or service areas; may contain semicolon-separated values and line breaks |
+| `ccc_district` | TEXT | Community-care-coupon service district, if applicable |
+| `address` | TEXT | Physical address |
+| `phone` | TEXT | Phone number |
+| `email` | TEXT | Email address |
+| `services` | TEXT | Free-text service description |
+| `website` | TEXT | Centre/unit website URL |
+| `carers_url` | TEXT | carers.hk detail page URL for the centre/unit |
+
+Query-writing notes:
+
+- Most real-world centres have one English row and one `zh-hk` row with the same `center_id`.
+- Use `center_id` to pair or deduplicate bilingual rows.
+- Prefer `language = 'zh-hk'` and Hong Kong Traditional Chinese terms unless English rows are required.
+- Use `LIKE '%keyword%'` for partial matching, especially for `district`, `center_type`, and `services`.
+- Common `zh-hk` district values include `東區`, `灣仔區`, `中西區`, `深水埗區`, `觀塘區`, `沙田區`, `元朗區`, `屯門區`, and `全港`.
+
+Example:
+
+```bash
+curl -X POST "https://songcpu1.cse.ust.hk/status/sql" \
+  -H "Content-Type: application/json" \
+  --data-binary @- <<'JSON'
+{
+    "sql": "SELECT center_id, center_name, district FROM elderly_services WHERE language = 'zh-hk' LIMIT 5;",
+    "max_rows": 100
+}
+JSON
+```
+
+Response shape:
+
+```json
+{
+  "sql": "SELECT ...;",
+  "columns": ["center_id", "center_name", "district"],
+  "rows": [
+    {"center_id": 7, "center_name": "value", "district": "value"}
+  ],
+  "row_count": 1,
+  "truncated": false
+}
+```
+
+If more rows are available than `max_rows`, `truncated` is `true`.
 
 ## Python Client Example
 
@@ -215,6 +330,17 @@ def text2query(question: str):
     )
     response.raise_for_status()
     return response.json()
+
+
+def sql_query(sql: str, max_rows: int = 500):
+    response = requests.post(
+        f"{BASE_URL}/sql",
+        json={"sql": sql, "max_rows": max_rows},
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
 
 def agentic_query(
     question: str,
