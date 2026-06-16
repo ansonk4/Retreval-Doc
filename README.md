@@ -163,8 +163,7 @@ curl -X POST "https://songcpu1.cse.ust.hk/status/retrieve" \
   -d '{
     "query": "基督教靈實協會",
     "top_k": 5,
-    "return_scores": true,
-    "check_sufficiency": false
+    "return_scores": true
   }'
 ```
 
@@ -181,15 +180,9 @@ Response shape:
       "similarity_score": 0.88
     }
   ],
-  "total_results": 5,
-  "sufficiency_result": {
-    "sufficient": true,
-    "reason": "string"
-  }
+  "total_results": 5
 }
 ```
-
-Note: `sufficiency_result` is `null` unless `check_sufficiency=true` and sufficiency checker is initialized.
 
 ## 4. Text2Query (`POST /text2query`)
 
@@ -200,9 +193,8 @@ The current default structured source is:
 - Excel: `data/structured_data/Elderly service information 20260302 split.xlsx`
 - SQLite: `data/structured_data/elderly_services_split.sqlite`
 
-The `carers_url` values are regenerated from live carers.hk unit indexes with
-detail-page matching; see
-[`docs/CARERS_URL_GENERATION.md`](docs/CARERS_URL_GENERATION.md).
+The `carers_url` values are included in the configured SQLite database. The
+SQLite table does not include the former free-text `services` column.
 
 For centre/unit row queries, `center_id` is always included in the returned rows. If the generated SQL omits it, the server adds it by matching the returned row back to the structured table.
 
@@ -263,7 +255,6 @@ Table: `elderly_services`
 | `address` | TEXT | Physical address |
 | `phone` | TEXT | Phone number |
 | `email` | TEXT | Email address |
-| `services` | TEXT | Free-text service description |
 | `website` | TEXT | Centre/unit website URL |
 | `carers_url` | TEXT | carers.hk detail page URL for the centre/unit |
 
@@ -272,7 +263,7 @@ Query-writing notes:
 - Most real-world centres have one English row and one `zh-hk` row with the same `center_id`.
 - Use `center_id` to pair or deduplicate bilingual rows.
 - Prefer `language = 'zh-hk'` and Hong Kong Traditional Chinese terms unless English rows are required.
-- Use `LIKE '%keyword%'` for partial matching, especially for `district`, `center_type`, and `services`.
+- Use `LIKE '%keyword%'` for partial matching, especially for `district` and `center_type`.
 - Common `zh-hk` district values include `東區`, `灣仔區`, `中西區`, `深水埗區`, `觀塘區`, `沙田區`, `元朗區`, `屯門區`, and `全港`.
 
 Example:
@@ -303,6 +294,11 @@ Response shape:
 ```
 
 If more rows are available than `max_rows`, `truncated` is `true`.
+
+## Test Set
+
+The retained test datasets live under `tests/test_set/`. Generated evaluation
+artifacts live under `tests/results/`.
 
 ## Python Client Example
 
